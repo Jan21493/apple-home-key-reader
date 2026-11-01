@@ -48,8 +48,12 @@ from nfc.tag.tt4 import Type4Tag
 
 from util.generic import chunked
 # Modified code BEGIN
-from util.nfc import with_crc16a
+from util.nfcutil import with_crc16a
 
+log = logging.getLogger(__name__)
+
+#logging.basicConfig(level=logging.DEBUG)
+#logging.getLogger("nfc.clf").setLevel(logging.DEBUG)
 
 # Monkey patch pn532 init function to disable baudrate renegotiation
 def patch_pn532_init_function():
@@ -179,7 +183,7 @@ def patch_usb_transport_implementation():
             self.usb_out = write_endpoint
             self.usb_dev = device
 
-            logging.debug(f"{self.usb_dev=} {self.usb_inp=} {self.usb_out=}")
+            log.debug(f"{self.usb_dev=} {self.usb_inp=} {self.usb_out=}")
 
             if not (self.usb_inp and self.usb_out):
                 log.error("no bulk endpoints for read and write")
@@ -262,8 +266,6 @@ def patch_usb_transport_implementation():
 patch_pn532_init_function()
 patch_usb_transport_implementation()
 
-log = logging.getLogger(__name__)
-
 # Re-declaring just for cleaner imports elsewhere
 ISODEPTag = Type4Tag
 RemoteTarget = RemoteTarget
@@ -284,11 +286,56 @@ class BroadcastFrameContactlessFrontend(ContactlessFrontend):
     # Modified code END
 
     def sense(self, *targets, **options):
+        def _retry_on_transient_io(op_name, fn, retries=3, base_delay=0.05):
+            """
+            Retry helper for PN53x transport glitches.
+            Retries only on ETIMEDOUT/EIO (and optionally EPIPE/ENODEV).
+            """
+            last_exc = None
+            for attempt in range(1, retries + 1):
+                try:
+                    return fn()
+                except (OSError, IOError) as e:
+                    last_exc = e
+                    err = getattr(e, "errno", None)
+
+                    # Treat these as transient transport glitches
+                    transient = err in (errno.ETIMEDOUT, errno.EIO, errno.EPIPE, errno.ENODEV)
+                    if not transient or attempt >= retries:
+                        raise
+
+                    log.warning(
+                        "################ %s failed with %r (errno=%s), retrying %d/%d after %.0fms",
+                        op_name,
+                        e,
+                        err,
+                        attempt,
+                        retries,
+                        base_delay * attempt * 1000,
+                    )
+
+                    # Try to bring RF field into a known state before retry
+                    try:
+                        self.device.mute()
+                    except Exception:
+                        # mute itself can fail if transport is currently broken; ignore and retry anyway
+                        pass
+
+                    time.sleep(base_delay * attempt)
+
+            # Should be unreachable because we either return or raise
+            raise last_exc  # pragma: no cover
+        
         def sense_tta(target):
             if target.sel_req and len(target.sel_req) not in (4, 7, 10):
                 raise ValueError("sel_req must be 4, 7, or 10 byte")
-            target = self.device.sense_tta(target)
-            # log.debug("found %s", target)
+            try:
+                target = self.device.sense_tta(target)
+            except IOError as e:
+                log.debug("Error in sense_tta: %s", e)
+                return None
+            
+            log.log(logging.DEBUG-1, "found %s", target)
             if target and len(target.sens_res) != 2:
                 error = "SENS Response Format Error (wrong length)"
                 log.debug(error)
@@ -345,23 +392,45 @@ class BroadcastFrameContactlessFrontend(ContactlessFrontend):
                     f"Broadcast frames are not supported with chipset {self.device} for target {target}"
                 )
 
-            # Turn off detection retries at it might break broadcast frame sequence
-            self.device.chipset.rf_configuration(0x05, [0xFF, 0x01, 0x00])
+            # Turn off detection retries as it might break broadcast frame sequence
+            _retry_on_transient_io(
+                "rf_configuration(0x05)",
+                lambda: self.device.chipset.rf_configuration(0x05, [0xFF, 0x01, 0x00]),
+            )
+
             # Set a 12 ms response timeout. Normally, WUPA takes 1.6-4.4 ms, so this timeout is more than sufficient
-            self.device.chipset.rf_configuration(0x02, [0x0A, 0x0B, 0x08])
+            _retry_on_transient_io(
+                "rf_configuration(0x02)",
+                lambda: self.device.chipset.rf_configuration(0x02, [0x0A, 0x0B, 0x08]),
+            )
 
             if target.brty.endswith("A"):
-                self.device.chipset.write_register("CIU_BitFraming", 0x00)
+                _retry_on_transient_io(
+                    "CIU_BitFraming",
+                    lambda: self.device.chipset.write_register("CIU_BitFraming", 0x00),
+                )
                 broadcast = with_crc16a(broadcast)
-            try:
-                _ = self.device.chipset.in_communicate_thru(broadcast, timeout=0.25)
 
+            def _send_broadcast():
+                return self.device.chipset.in_communicate_thru(broadcast, timeout=0.25)
+
+            try:
+                _retry_on_transient_io("in_communicate_thru(broadcast)", _send_broadcast)
                 # Can proccess response here later
             except (nfc.clf.pn53x.Chipset.Error,) as e:
                 # Timeout is OK for broadcast frames as we don't always expect an answer
                 if e.errno != 0x01:
                     raise
-
+            except IOError as e:
+                # ETIMEOUT is returned when no response is received, which is OK for broadcast frames
+                log.debug(f"IO Error in sense_broadcast: {e}")
+                if not e.errno == errno.ETIMEDOUT:
+                    log.exception("sense_broadcast: Unhandled exception in in_communicate_thru")  # entspricht exc_info=True
+                    raise e
+                else:
+                    log.debug("No response received for broadcast frame, continuing...")
+                    return
+        
         # Modified code END
 
         for target in targets:
@@ -373,8 +442,8 @@ class BroadcastFrameContactlessFrontend(ContactlessFrontend):
                 raise IOError(errno.ENODEV, os.strerror(errno.ENODEV))
 
             self.target = None  # forget captured target
-            self.device.mute()  # deactivate the rf field
-
+            # deactivate the rf field
+            _retry_on_transient_io("mute", lambda: self.device.mute(), )
             for i in range(max(1, options.get("iterations", 1))):
                 started = time.time()
                 for target in targets:
@@ -396,18 +465,35 @@ class BroadcastFrameContactlessFrontend(ContactlessFrontend):
                             sense_broadcast(target, options.get("broadcast", None))
                         # Modified code END
                     except UnsupportedTargetError as error:
+                        #
+                        log.exception("sense: Unhandled exception in for target loop")  # entspricht exc_info=True
                         if len(targets) == 1:
                             raise error
                         else:
                             log.debug(error)
                     except CommunicationError as error:
                         log.debug(error)
+                        log.exception("sense: Unhandled CommunicationError in for target loop")  # entspricht exc_info=True
                     else:
                         if self.target is not None:
                             log.debug("found {0}".format(self.target))
                             return self.target
                 if len(targets) > 0:
-                    self.device.mute()  # deactivate the rf field
+                    try:
+                        self.device.mute()  # deactivate the rf field
+                    except IOError as error:
+                        #log.exception("input/output error while waiting for ack")  # entspricht exc_info=True
+                        if error.errno != errno.ETIMEDOUT:
+                            log.error(f"Input/output error while while trying to mute: {error.errno} {error.strerror}")
+                            raise
+                        else:
+                            # if timeout occurred, continue without raising exception
+                            log.warning("Timeout while while trying to mute - continue ...")
+                            return
+                    except Exception as e:
+                        log.debug(f"Exception in device.mute(): {e}")
+                        raise
+
                 if i < options.get("iterations", 1) - 1:
                     elapsed = time.time() - started
                     time.sleep(max(0, options.get("interval", 0.1) - elapsed))

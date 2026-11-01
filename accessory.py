@@ -29,7 +29,9 @@ class Lock(Accessory):
     def on_endpoint_authenticated(self, endpoint):
         self._lock_target_state = 0 if self._lock_current_state else 1
         log.info(
-            f"Toggling lock state due to endpoint authentication event {self._lock_target_state} -> {self._lock_current_state} {endpoint}"
+            f"Toggling lock state due to endpoint authentication event "
+            f"{self._lock_target_state} -> {self._lock_current_state}"
+            f"{f' {endpoint}' if log.isEnabledFor(logging.DEBUG) else ''}"
         )
         self.lock_target_state.set_value(self._lock_target_state, should_notify=True)
         self._lock_current_state = self._lock_target_state
@@ -124,11 +126,11 @@ class Lock(Accessory):
         self.service.update_hap_pairings(client_public_keys)
 
     def get_lock_current_state(self):
-        log.info("get_lock_current_state")
+        log.debug("get_lock_current_state")
         return self._lock_current_state
 
     def get_lock_target_state(self):
-        log.info("get_lock_target_state")
+        log.debug("get_lock_target_state")
         return self._lock_target_state
 
     def set_lock_target_state(self, value):
@@ -138,7 +140,7 @@ class Lock(Accessory):
         return self._lock_target_state
 
     def get_lock_version(self):
-        log.info("get_lock_version")
+        log.debug("get_lock_version")
         return ""
 
     def set_lock_control_point(self, value):
@@ -147,17 +149,17 @@ class Lock(Accessory):
     # All methods down here are forwarded to Service
     def get_hardware_finish(self):
         self._update_hap_pairings()
-        log.info("get_hardware_finish")
+        log.debug("get_hardware_finish")
         return self.service.get_hardware_finish()
 
     def get_nfc_access_supported_configuration(self):
         self._update_hap_pairings()
-        log.info("get_nfc_access_supported_configuration")
+        log.debug("get_nfc_access_supported_configuration")
         return self.service.get_nfc_access_supported_configuration()
 
     def get_nfc_access_control_point(self):
         self._update_hap_pairings()
-        log.info("get_nfc_access_control_point")
+        log.debug("get_nfc_access_control_point")
         return self.service.get_nfc_access_control_point()
 
     def set_nfc_access_control_point(self, value):
@@ -167,7 +169,7 @@ class Lock(Accessory):
 
     def get_configuration_state(self):
         self._update_hap_pairings()
-        log.info("get_configuration_state")
+        log.debug("get_configuration_state")
         return self.service.get_configuration_state()
 
     @property

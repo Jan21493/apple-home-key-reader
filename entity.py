@@ -135,6 +135,8 @@ class HardwareFinishColor(Enum):
     SILVER = bytes.fromhex("E3E3E300")
     BLACK = bytes.fromhex("00000000")
 
+    def __str__(self):
+        return f"{self.name} (0x{self.value.hex().upper()})"
 
 class Operation(IntEnum):
     GET = 0x01

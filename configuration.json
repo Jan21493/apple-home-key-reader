@@ -1,17 +1,23 @@
 {
     "logging": {
-        "level": 20
+        "level": 10
     },
 
     "nfc": {
-        "path": "tty:usbserial-0001:pn532",
+        "path": "tty:ttyUSB0:pn532",
         "broadcast": true
     },
 
     "hap": {
         "port": 51926,
         "persist": "hap.state",
-        "default": "locked"
+        "default": "locked",
+        "pincode": "300-12-345",
+        "lock-name": "My NFC Lock",
+        "info_manufacturer": "My Manufacturer",
+        "info_model": "My Lock Model",
+        "info_firmware_revision": "1.0",
+        "info_serial_number": "01.02.03.04"
     },
 
     "homekey": {
@@ -19,5 +25,11 @@
         "express": true,
         "finish": "silver",
         "flow": "fast"
+    },
+    "cardsignatures": {
+        "path": "cardsignatures.json"
+    },
+    "mycards": {
+        "path": "myCards.json"
     }
 }

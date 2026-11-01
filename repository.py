@@ -40,7 +40,7 @@ class Repository:
                 ]
         except Exception:
             log.exception(
-                f"Could not load Home Key configuration. Assuming that device is not yet configured..."
+                 "Could not load Home Key configuration. Assuming that device is not yet configured..."
             )
             pass
 

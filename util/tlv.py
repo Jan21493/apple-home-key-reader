@@ -1,35 +1,43 @@
 from enum import Enum, IntEnum
-from typing import Collection, List, Union, Dict
+from typing import Collection, List, Union, Dict, Any, TypeVar, Type
 
 from util.generic import int_to_bytes
 from util.structable import PackableData, Packable, Unpackable, pack, represent
 
 
-def try_cast_type(value: bytes, type):
+T = TypeVar("T")
+
+def try_cast_value(value: Any, target_type: Type[T]) -> T | Any:
+    """
+    Tries to convert a value to the target type.
+    Supports Packable/Unpackable protocols and Enums.
+    """
     if isinstance(value, Packable):
         value = value.pack()
-    if (
-        not isinstance(value, memoryview)
-        and not isinstance(value, bytes)
-        and not isinstance(value, bytearray)
-    ):
+
+    if not isinstance(value, (bytes, bytearray, memoryview)):
         return value
 
     try:
-        if issubclass(type, IntEnum):
-            return type(int.from_bytes(value, "big"))
-        elif issubclass(type, Enum):
-            return type(value)
-        elif issubclass(type, Unpackable):
-            return type.unpack(value)
-        elif type == bytes or type == memoryview or type == bytearray:
+        if issubclass(target_type, Unpackable):
+            return target_type.unpack(value)
+
+        if issubclass(target_type, Enum):
+            if issubclass(target_type, IntEnum):
+                return target_type(int.from_bytes(value, "big"))
+            return target_type(value)
+
+        if target_type in {bytes, bytearray, memoryview}:
             return bytes(value)
-        elif type == int:
+
+        if target_type is int:
             return int.from_bytes(value, "big")
-        else:
-            return value
-    except (TypeError, ValueError, Exception):
-        return value
+
+    except (TypeError, ValueError):
+        # Nur spezifische Konvertierungsfehler abfangen
+        pass
+
+    return value
 
 
 def unpack_optional_tlv(value):
@@ -376,7 +384,7 @@ class TLV8Object(Packable, Unpackable, metaclass=TLV8ObjectMeta):
     def unpack(cls, data) -> "TLV8Object":
         tlv_array = TLV8.unpack_array(data)
         result = {
-            name: try_cast_type(
+            name: try_cast_value(
                 unpack_optional_tlv(
                     next((tlv for tlv in tlv_array if tlv.tag == field.index), None)
                 ),

@@ -34,12 +34,12 @@ from util.digital_key import (
 )
 from util.generic import chunked, get_tlv_tag
 from util.iso18013 import ISO18013SecureContext
-from util.iso7816 import ISO7816, ISO7816Application, ISO7816Command, ISO7816Tag
+from util.iso7816 import ISO7816, ISO7816Application, ISO7816Command, ISO7816Tag, ISO7816Class, ISO7816StatusGroup, ISO7816Instruction
 from util.ndef import NDEFMessage, NDEFRecord
 from util.structable import pack
 from util.tlv import BERTLV as TLV
 
-log = logging.getLogger()
+log = logging.getLogger(__name__)
 
 
 class ProtocolError(Exception):
@@ -167,13 +167,18 @@ def fast_auth(
     command_data = pack(command_tlv)
 
     command = ISO7816Command(
-        cla=0x80, ins=0x80, p1=flags[0], p2=flags[1], data=command_data, le=None
+        cla=ISO7816Class.PROPRIETARY, ins=ISO7816Instruction.INTERNAL_AUTHENTICATE, p1=flags[0], p2=flags[1], data=command_data, le=None
     )
-    log.info(f"AUTH0 CMD = {command}")
-    response = tag.transceive(command)
-    if response.sw != (0x90, 0x00):
+    log.debug(f"AUTH0 CMD = {command}")
+    try:
+        response = tag.transceive(command)
+    except Exception as e:
+        log.error(f"AUTH0 ERROR: {e}")
+        raise ProtocolError(f"AUTH0 EXCEPTION - ERROR: {e}")
+
+    if response.sw != (ISO7816StatusGroup.SUCCESS, 0x00):
         raise ProtocolError(f"AUTH0 INVALID STATUS {response.sw}")
-    log.info(f"AUTH0 RES = {response}")
+    log.debug(f"AUTH0 RES = {response}")
     tlv_array = TLV.unpack_array(response.data)
 
     endpoint_ephemeral_public_key_tag = get_tlv_tag(tlv_array, 0x86)
@@ -233,13 +238,13 @@ def fast_auth(
         kmac = hkdf[key_size * 2 : key_size * 3]
         krmac = hkdf[key_size * 3 :]
         calculated_cryptogram = kcmac
-        log.info(
+        log.debug(
             f"Endpoint({endpoint.id.hex()}):"
             f" returned_cryptogram={returned_cryptogram.hex()}"
             f" ? calculated_cryptogram={calculated_cryptogram.hex()}"
         )
         if returned_cryptogram == calculated_cryptogram:
-            log.info(
+            log.debug(
                 f"Cryptograms match for Endpoint({endpoint.id.hex()}):"
                 f" kcmac={kcmac.hex()} kenc={kenc.hex()} kmac={kmac.hex()} krmac={krmac.hex()};"
             )
@@ -275,7 +280,7 @@ def standard_auth(
     reader_ephemeral_public_key_x, _ = get_ec_key_public_points(
         reader_ephemeral_public_key
     )
-    log.info(
+    log.debug(
         f"endpoint_ephemeral_public_key_x={endpoint_ephemeral_public_key_x.hex()}"
         f" reader_ephemeral_public_key_x={reader_ephemeral_public_key_x.hex()}"
     )
@@ -288,23 +293,28 @@ def standard_auth(
         TLV(0x93, value=READER_CONTEXT),
     ]
     authentication_hash_input = pack(authentication_hash_input_material)
-    log.info(f"authentication_hash_input={authentication_hash_input.hex()}")
+    log.debug(f"authentication_hash_input={authentication_hash_input.hex()}")
 
     signature = reader_private_key.sign(
         authentication_hash_input, ec.ECDSA(hashes.SHA256())
     )
-    log.info(f"signature={signature.hex()} ({hex(len(signature))})")
+    log.debug(f"signature={signature.hex()} ({hex(len(signature))})")
     x, y = decode_dss_signature(signature)
     signature_point_form = bytes([*x.to_bytes(32, "big"), *y.to_bytes(32, "big")])
-    log.info(f"signature_point_form={signature_point_form.hex()} ({hex(len(signature_point_form))})")
+    log.debug(f"signature_point_form={signature_point_form.hex()} ({hex(len(signature_point_form))})")
 
     data = TLV(0x9E, value=signature_point_form)
-    command = ISO7816Command(cla=0x80, ins=0x81, p1=0x00, p2=0x00, data=data)
+    command = ISO7816Command(cla=ISO7816Class.PROPRIETARY, ins=ISO7816Instruction.STANDARD_AUTHENTICATE, p1=0x00, p2=0x00, data=data)
 
-    log.info(f"AUTH1 COMMAND {command}")
-    response = tag.transceive(command)
-    log.info(f"AUTH1 RESPONSE: {response}")
-    if response.sw != (0x90, 0x00):
+    log.debug(f"AUTH1 CMD {command}")
+    try:
+        response = tag.transceive(command)
+    except Exception as e:
+        log.error(f"AUTH1 CMD ERROR: {e}")
+        raise ProtocolError(f"AUTH1 CMD EXCEPTION - ERROR: {e}")
+
+    log.debug(f"AUTH1 RESPONSE: {response}")
+    if response.sw != (ISO7816StatusGroup.SUCCESS, 0x00):
         raise ProtocolError(f"AUTH1 INVALID STATUS {response.sw}")
 
     get_key_material = get_key_material_generator(
@@ -318,24 +328,24 @@ def standard_auth(
     )
 
     k_persistent = get_key_material(context=Context.PERSISTENT, key_size=key_size * 2)
-    log.info(f"k_persistent={k_persistent.hex()}")
+    log.debug(f"k_persistent={k_persistent.hex()}")
 
     hkdf = get_key_material(context=Context.VOLATILE, key_size=key_size * 3)
-    log.info(f"hkdf={hkdf.hex()}")
+    log.debug(f"hkdf={hkdf.hex()}")
     kenc = hkdf[: key_size * 1]
     kmac = hkdf[key_size * 1 : key_size * 2]
     krmac = hkdf[key_size * 2 :]
-    log.info(f"kenc={kenc.hex()} kmac={kmac.hex()} krmac={krmac.hex()}")
+    log.debug(f"kenc={kenc.hex()} kmac={kmac.hex()} krmac={krmac.hex()}")
 
     secure = DigitalKeySecureContext(tag, kenc, kmac, krmac)
 
     try:
         response, secure.counter = secure.decrypt_response(response)
     except (AssertionError,):
-        log.info("AUTH1 COULD NOT DECRYPT RESPONSE")
+        log.debug("AUTH1 COULD NOT DECRYPT RESPONSE")
         return k_persistent, None, None
 
-    log.info(f"AUTH1 DECRYPTED RESPONSE: {response}")
+    log.debug(f"AUTH1 DECRYPTED RESPONSE: {response}")
 
     tlv_array = TLV.unpack_array(response.data)
 
@@ -407,16 +417,21 @@ def exchange_attestation(tag: ISO7816Tag, shared_secret: bytes):
         ]
     )
     envelope1_command = ISO7816Command(
-        cla=0x00,
-        ins=0xC3,
+        cla=ISO7816Class.INTERINDUSTRY,
+        ins=ISO7816Instruction.ENVELOPE,
         p1=0x00,
         p2=0x01,
         le=0x00,
         data=pack(TLV(0x53, value=envelope1_engagement_message)),
     )
-    log.info(f"ENVELOPE1 CMD = {envelope1_command}")
-    envelope1_response = tag.transceive(envelope1_command)
-    log.info(f"ENVELOPE1 RES = {envelope1_response}")
+    log.debug(f"ENVELOPE1 CMD = {envelope1_command}")
+    try:
+        envelope1_response = tag.transceive(envelope1_command)
+    except Exception as e:
+        log.error(f"ENVELOPE1 CMD ERROR: {e}")
+        raise ProtocolError(f"ENVELOPE1 CMD EXCEPTION - ERROR: {e}")
+
+    log.debug(f"ENVELOPE1 RES = {envelope1_response}")
 
     envelope1_command_ndef = NDEFMessage.unpack(
         TLV.unpack(envelope1_command.data).value
@@ -484,21 +499,31 @@ def exchange_attestation(tag: ISO7816Tag, shared_secret: bytes):
     )
 
     command = ISO7816Command(
-        cla=0x00, ins=0xC3, p1=0x00, p2=0x00, data=envelope2_command_data, le=0x00
+        cla=ISO7816Class.INTERINDUSTRY, ins=ISO7816Instruction.ENVELOPE, p1=0x00, p2=0x00, data=envelope2_command_data, le=0x00
     )
-    log.info(f"ENVELOPE2 CMD = {command}")
-    response = tag.transceive(command)
-    log.info(f"ENVELOPE2 RES = {response}")
+    log.debug(f"ENVELOPE2 CMD = {command}")
+    try:
+        response = tag.transceive(command)
+    except Exception as e:
+        log.error(f"ENVELOPE2 CMD ERROR: {e}")
+        raise ProtocolError(f"ENVELOPE2 CMD EXCEPTION - ERROR: {e}")
+
+    log.debug(f"ENVELOPE2 RES = {response}")
 
     data = response.data
 
-    while response.sw1 == 0x61:
+    while response.sw1 == ISO7816StatusGroup.OK_MORE_DATA_LEFT:
         command = ISO7816Command(
-            cla=0x00, ins=0xC0, p1=0x00, p2=0x00, data=None, le=response.sw2
+            cla=ISO7816Class.INTERINDUSTRY, ins=ISO7816Instruction.GET_RESPONSE, p1=0x00, p2=0x00, data=None, le=response.sw2
         )
-        log.info(f"GET DATA CMD = {command}")
-        response = tag.transceive(command)
-        log.info(f"GET DATA RES = {response}")
+        log.debug(f"GET DATA CMD = {command}")
+        try:
+            response = tag.transceive(command)
+        except Exception as e:
+            log.error(f"GET DATA CMD ERROR: {e}")
+            raise ProtocolError(f"GET DATA CMD EXCEPTION - ERROR: {e}")
+
+        log.debug(f"GET DATA RES = {response}")
         data += response.data
 
     endpoint_cbor_plaintext = iso18013secure.decrypt_message_from_endpoint(
@@ -517,34 +542,44 @@ def mailbox_exchange(
 
     command_data = pack(command_tlv)
     command = ISO7816Command(
-        cla=0x84, ins=0xC9, p1=0x00, p2=0x00, data=command_data, le=0x00
+        cla=ISO7816Class.PSEC, ins=ISO7816Instruction.MAILBOX_EXCHANGE, p1=0x00, p2=0x00, data=command_data, le=0x00
     )
-    log.info(f"EXCHANGE COMMAND {command}")
+    log.debug(f"EXCHANGE COMMAND {command}")
 
     response = secure.transceive(command)
-    log.info(f"EXCHANGE RESPONSE {response}")
-    if response.sw1 != 0x90:
+    log.debug(f"EXCHANGE RESPONSE {response}")
+    if response.sw1 != ISO7816StatusGroup.SUCCESS:
         raise ProtocolError("Mailbox exchange failed")
     return response.data
 
 
 def select_applet(tag: ISO7816Tag, applet=ISO7816Application.HOME_KEY):
     command = ISO7816.select_aid(applet)
-    log.info(f"SELECT CMD = {command}")
-    response = tag.transceive(command)
-    if response.sw != (0x90, 0x00):
+    log.debug(f"SELECT APP CMD = {command}")
+    try:
+        response = tag.transceive(command)
+    except Exception as e:
+        log.error(f"SELECT APP CMD ERROR: {e}")
+        raise ProtocolError(f"SELECT APP CMD EXCEPTION - ERROR: {e}")
+    
+    if response.sw != (ISO7816StatusGroup.SUCCESS, 0x00):
         raise ProtocolError(
             f"Could not select {applet} {hex(response.sw1)} {hex(response.sw2)}"
         )
-    log.info(f"SELECT RES = {response}")
+    log.debug(f"SELECT APP RES = {response}")
     return response.data
 
 
 def control_flow(tag: ISO7816Tag, p1=0x01, p2=0x00):
-    command = ISO7816Command(cla=0x80, ins=0x3C, p1=p1, p2=p2, data=None, le=None)
-    log.info(f"OP_CONTROL_FLOW CMD = {command}")
-    response = tag.transceive(command)
-    log.info(f"OP_CONTROL_FLOW RES = {response}")
+    command = ISO7816Command(cla=ISO7816Class.PROPRIETARY, ins=ISO7816Instruction.OP_CONTROL_FLOW, p1=p1, p2=p2, data=None, le=None)
+    log.debug(f"OP_CONTROL_FLOW CMD = {command}")
+    try:
+        response = tag.transceive(command)
+    except Exception as e:
+        log.error(f"OP_CONTROL_FLOW CMD ERROR: {e}")
+        raise ProtocolError(f"OP_CONTROL_FLOW CMD EXCEPTION - ERROR: {e}")
+
+    log.debug(f"OP_CONTROL_FLOW RES = {response}")
     return response.data
 
 
@@ -570,13 +605,13 @@ def perform_authentication_flow(
     reader_public_key_x, reader_public_key_y = get_ec_key_public_points(
         reader_public_key
     )
-    log.info(
+    log.debug(
         f"Reader public key: x={reader_public_key_x.hex()} y={reader_public_key_y.hex()}"
     )
 
     reader_ephemeral_public_key = reader_ephemeral_private_key.public_key()
 
-    log.info(f"protocol_version={protocol_version.hex()}")
+    log.debug(f"protocol_version = 0x{bytes(protocol_version).hex().upper()}")
 
     endpoint_ephemeral_public_key, endpoint, secure = fast_auth(
         tag=tag,
@@ -722,13 +757,13 @@ def read_homekey(
     for preferred_version in preferred_versions:
         if preferred_version in device_protocol_versions:
             protocol_version = preferred_version
-            log.info(f"Choosing preferred version {protocol_version}")
+            log.info(f"Choosing preferred version 0x{bytes(protocol_version).hex().upper}")
             break
     else:
         protocol_version = device_protocol_versions[0]
         log.info(f"Defaulting to the newest available version {protocol_version}")
     if protocol_version != b"\x02\x00":
-        raise ProtocolError("Only officially supported protocol version is 0200")
+        raise ProtocolError("Only officially supported protocol version is 0x0200")
 
     reader_private_key = ec.derive_private_key(
         int.from_bytes(reader_private_key, "big"), ec.SECP256R1()
@@ -752,6 +787,7 @@ def read_homekey(
         issuers=issuers,
         key_size=key_size,
     )
+    log.info(f"Authentication finished, endpoint found = {endpoint is not None}")
     if endpoint is not None:
         endpoint.last_used_at = int(time.time())
         endpoint.counter += 1
@@ -759,8 +795,12 @@ def read_homekey(
     if issuer and endpoint not in get_endpoints_from_issuers(issuers):
         issuer.endpoints.append(endpoint)
 
+    log.info(f"Notify about completion. Flow={result_flow}")
+
     # Notify about transaction completion.
     if result_flow != DigitalKeyFlow.ATTESTATION:
         control_flow(tag)
+
+    log.info("Read homekey completed.")
 
     return result_flow, issuers, endpoint
